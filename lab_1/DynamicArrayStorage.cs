@@ -2,45 +2,98 @@ namespace ParallelLab1;
 
 public sealed class DynamicArrayStorageImplementation<T> : ICustomStorage<T> where T : IComparable<T>
 {
+    private readonly object _syncRoot = new();
+    private readonly bool _enableLock;
     private readonly Func<T, bool>? _acceptFilter;
+
     private T[] _items;
     private int _count;
     private long _rejected;
 
     public event Action<T>? ItemAdded;
+
     public event Action<int>? CapacityExceeded;
 
-    public DynamicArrayStorageImplementation(int initialCapacity = 4, Func<T, bool>? acceptFilter = null)
+    public DynamicArrayStorageImplementation(bool enableLock, int initialCapacity = 4, Func<T, bool>? acceptFilter = null)
     {
         if (initialCapacity < 1) throw new ArgumentOutOfRangeException(nameof(initialCapacity));
+        _enableLock = enableLock;
         _acceptFilter = acceptFilter;
         _items = new T[initialCapacity];
     }
 
-    public int Count => _count;
-    public long Rejected => _rejected;
+    public bool LockEnabled => _enableLock;
+
+    public int Count
+    {
+        get
+        {
+            if (!_enableLock) return _count;
+            lock (_syncRoot) return _count;
+        }
+    }
+
+    public long Rejected
+    {
+        get
+        {
+            if (!_enableLock) return _rejected;
+            lock (_syncRoot) return _rejected;
+        }
+    }
 
     public void Add(T item)
     {
+        bool added;
+        int newCapacity;
+
+        if (_enableLock)
+        {
+            lock (_syncRoot)
+            {
+                added = AddCore(item, out newCapacity);
+            }
+        }
+        else
+        {
+            added = AddCore(item, out newCapacity);
+        }
+
+        if (newCapacity > 0) CapacityExceeded?.Invoke(newCapacity);
+        if (added) ItemAdded?.Invoke(item);
+    }
+
+    private bool AddCore(T item, out int newCapacity)
+    {
+        newCapacity = 0;
+
         if (_acceptFilter != null && !_acceptFilter(item))
         {
             _rejected++;
-            return;
+            return false;
         }
 
-        if (_count == _items.Length)
+        if (_count == _items.Length)       
         {
-            int newCapacity = _items.Length * 2;
+            newCapacity = _items.Length * 2;
             Array.Resize(ref _items, newCapacity);
-            CapacityExceeded?.Invoke(newCapacity);
         }
 
         _items[_count] = item;
-        _count++;
-        ItemAdded?.Invoke(item);
+        _count++;     
+        return true;
     }
 
     public bool TryRemove(out T item)
+    {
+        if (_enableLock)
+        {
+            lock (_syncRoot) return RemoveCore(out item);
+        }
+        return RemoveCore(out item);
+    }
+
+    private bool RemoveCore(out T item)
     {
         if (_count == 0)
         {
@@ -55,12 +108,31 @@ public sealed class DynamicArrayStorageImplementation<T> : ICustomStorage<T> whe
 
     public void Clear()
     {
+        if (_enableLock)
+        {
+            lock (_syncRoot) ClearCore();
+            return;
+        }
+        ClearCore();
+    }
+
+    private void ClearCore()
+    {
         Array.Clear(_items, 0, _items.Length);
         _count = 0;
         _rejected = 0;
     }
 
     public bool TryGetExtremes(out T min, out T max)
+    {
+        if (_enableLock)
+        {
+            lock (_syncRoot) return ExtremesCore(out min, out max);
+        }
+        return ExtremesCore(out min, out max);
+    }
+
+    private bool ExtremesCore(out T min, out T max)
     {
         min = max = default!;
         int n = _count;
