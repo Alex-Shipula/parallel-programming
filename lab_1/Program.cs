@@ -7,6 +7,7 @@ internal static class Program
 {
     // Поточне сховище, яке «бачить» фоновий монітор
     private static volatile DynamicArrayStorageImplementation<int>? _current;
+    private static volatile bool _stop;
 
     private static void Main()
     {
@@ -19,6 +20,9 @@ internal static class Program
 
         Console.WriteLine("\n=== ДЕМОНСТРАЦІЯ 2: те саме З lock ===");
         RunRaceDemo(enableLock: true);
+
+        Console.WriteLine("\n=== ДЕМОНСТРАЦІЯ 3: вплив ThreadPriority (з lock, фіксований інтервал) ===");
+        RunPriorityDemo();
 
         Console.WriteLine("\nГоловний потік завершується. Потік-монітор (IsBackground = true) " +
                           "буде примусово зупинений середовищем виконання, хоча в ньому while(true).");
@@ -44,7 +48,7 @@ internal static class Program
                         : "порожньо";
                     Console.WriteLine($"   [Monitor] Count={s.Count,10:N0}  {ext}");
                 }
-                catch (Exception ex)   // без lock монітор теж може зловити пошкоджений стан
+                catch (Exception ex)
                 {
                     Console.WriteLine($"   [Monitor] помилка читання: {ex.GetType().Name}");
                 }
@@ -52,7 +56,7 @@ internal static class Program
         })
         {
             Name = "Monitor",
-            IsBackground = true,                        // не заважає завершенню застосунку
+            IsBackground = true,
             Priority = ThreadPriority.BelowNormal
         };
         monitor.Start();
@@ -117,5 +121,89 @@ internal static class Program
             : "РЕЗУЛЬТАТ: ПОРУШЕННЯ ЦІЛІСНОСТІ — стан гонки!");
 
         Thread.Sleep(400);   // щоб монітор встиг вивести фінальний стан
+    }
+
+    ///////////////////////// Демонстрація впливу пріоритетів ///////////////////////
+    private static void RunPriorityDemo()
+    {
+        const int DurationMs = 3000;
+
+        // Фільтр, тільки значення >= 10
+        var storage = new DynamicArrayStorageImplementation<int>(enableLock: true, initialCapacity: 4, acceptFilter: x => x >= 10);
+        _current = storage;
+        _stop = false;
+
+        var priorities = new[] { ThreadPriority.Highest, ThreadPriority.Normal, ThreadPriority.Lowest };
+        var generated = new long[priorities.Length];
+        var threads = new Thread[priorities.Length];
+
+        // Пріоритети дають помітний ефект лише при конкуренції за ЦП,
+        // тому на час тесту прив'язуємо процес до одного ядра (де підтримується).
+        IntPtr? oldAffinity = TryPinToSingleCore();
+        Console.WriteLine(oldAffinity.HasValue
+            ? "Процес прив'язано до одного ядра для чистоти експерименту."
+            : "Не вдалося прив'язати до одного ядра (на багатоядерному ЦП різниця може бути малою).");
+
+        for (int i = 0; i < threads.Length; i++)
+        {
+            int idx = i;
+            threads[i] = new Thread(() =>
+            {
+                long local = 0;
+                while (!_stop)
+                {
+                    storage.Add(Random.Shared.Next(1000));
+                    local++;
+                }
+                generated[idx] = local;
+            })
+            {
+                Name = $"Producer-{priorities[i]}",
+                Priority = priorities[i]
+            };
+        }
+
+        foreach (var t in threads) t.Start();
+        Thread.Sleep(DurationMs);       // однаковий інтервал для всіх
+        _stop = true;
+        foreach (var t in threads) t.Join();
+
+        if (oldAffinity.HasValue) RestoreAffinity(oldAffinity.Value);
+
+        long total = generated.Sum();
+        Console.WriteLine($"\nІнтервал: {DurationMs} мс");
+        for (int i = 0; i < threads.Length; i++)
+            Console.WriteLine($"  {priorities[i],-8} згенеровано: {generated[i],12:N0}  ({(double)generated[i] / total:P1})");
+
+        Console.WriteLine($"\nУсього згенеровано:   {total:N0}");
+        Console.WriteLine($"Відхилено фільтром:   {storage.Rejected:N0}");
+        Console.WriteLine($"У колекції (Count):   {storage.Count:N0}");
+        Console.WriteLine(storage.Count + storage.Rejected == total
+            ? "РЕЗУЛЬТАТ: Count + Rejected == згенеровано — дані цілісні."
+            : "РЕЗУЛЬТАТ: невідповідність!");
+
+        // Демонстрація TryRemove (LIFO) та Clear
+        Console.Write("TryRemove x3: ");
+        for (int i = 0; i < 3 && storage.TryRemove(out int v); i++) Console.Write(v + " ");
+        Console.WriteLine($"-> Count={storage.Count:N0}");
+        storage.Clear();
+        Console.WriteLine($"Після Clear(): Count={storage.Count}");
+    }
+
+    private static IntPtr? TryPinToSingleCore()
+    {
+        try
+        {
+            var p = Process.GetCurrentProcess();
+            IntPtr old = p.ProcessorAffinity;
+            p.ProcessorAffinity = (IntPtr)1;
+            return old;
+        }
+        catch { return null; }
+    }
+
+    private static void RestoreAffinity(IntPtr old)
+    {
+        try { Process.GetCurrentProcess().ProcessorAffinity = old; } catch { }
     }
 }
