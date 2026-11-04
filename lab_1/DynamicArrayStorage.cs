@@ -132,18 +132,25 @@ public sealed class DynamicArrayStorageImplementation<T> : ICustomStorage<T> whe
         return ExtremesCore(out min, out max);
     }
 
-    private bool ExtremesCore(out T min, out T max)
+   private bool ExtremesCore(out T min, out T max)
     {
         min = max = default!;
         int n = _count;
         if (n == 0) return false;
 
-        min = max = _items[0];
-        for (int i = 1; i < n; i++)
+        int startIdx = 0;
+        while (startIdx < n && _items[startIdx] is null) startIdx++;
+        if (startIdx >= n) return false;
+
+        min = max = _items[startIdx];
+        for (int i = startIdx + 1; i < n; i++)
         {
             T v = _items[i];
-            if (v.CompareTo(min) < 0) min = v;
-            if (v.CompareTo(max) > 0) max = v;
+            if (v is not null)
+            {
+                if (v.CompareTo(min) < 0) min = v;
+                if (v.CompareTo(max) > 0) max = v;
+            }
         }
         return true;
     }

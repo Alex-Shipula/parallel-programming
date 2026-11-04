@@ -5,8 +5,7 @@ using ParallelLab1;
 
 internal static class Program
 {
-    // Поточне сховище, яке «бачить» фоновий монітор
-    private static volatile DynamicArrayStorageImplementation<int>? _current;
+    private static volatile DynamicArrayStorageImplementation<WorkTask>? _current;
     private static volatile bool _stop;
 
     private static void Main()
@@ -21,15 +20,12 @@ internal static class Program
         Console.WriteLine("\n=== ДЕМОНСТРАЦІЯ 2: те саме З lock ===");
         RunRaceDemo(enableLock: true);
 
-        Console.WriteLine("\n=== ДЕМОНСТРАЦІЯ 3: вплив ThreadPriority (з lock, фіксований інтервал) ===");
+        Console.WriteLine("\n=== ДЕМОНСТРАЦІЯ 3: вплив ThreadPriority (з lock, об'єкти-колекції) ===");
         RunPriorityDemo();
 
         Console.WriteLine("\nГоловний потік завершується. Потік-монітор (IsBackground = true) " +
                           "буде примусово зупинений середовищем виконання, хоча в ньому while(true).");
     }
-
-
-    //////////////////////////// Фоновий потік-монітор /////////////////////////////
 
     private static void StartMonitor()
     {
@@ -37,14 +33,14 @@ internal static class Program
         {
             while (true)
             {
-                Thread.Sleep(300);                      // 200–500 мс
+                Thread.Sleep(300);
                 var s = _current;
                 if (s is null) continue;
 
                 try
                 {
-                    string ext = s.TryGetExtremes(out int min, out int max)
-                        ? $"min={min}, max={max}"
+                    string ext = s.TryGetExtremes(out WorkTask min, out WorkTask max)
+                        ? $"min={min.Priority}, max={max.Priority}"
                         : "порожньо";
                     Console.WriteLine($"   [Monitor] Count={s.Count,10:N0}  {ext}");
                 }
@@ -62,20 +58,17 @@ internal static class Program
         monitor.Start();
     }
 
-    //////////////////////// Демонстрація стану гонки: 3 продюсери по N елементів //////////////////////////////
-
     private static void RunRaceDemo(bool enableLock)
     {
         const int Producers = 3;
-        const int PerProducer = 1_000_000;
+        const int PerProducer = 500_000;
         int expected = Producers * PerProducer;
 
-        var storage = new DynamicArrayStorageImplementation<int>(enableLock, initialCapacity: 4);
+        var storage = new DynamicArrayStorageImplementation<WorkTask>(enableLock, initialCapacity: 4);
         int specialItems = 0, resizes = 0;
         var errors = new ConcurrentDictionary<string, int>();
 
-        // Підписка на події (делегати)
-        storage.ItemAdded += x => { if (x >= 990) Interlocked.Increment(ref specialItems); };
+        storage.ItemAdded += x => { if (x.Priority >= 990) Interlocked.Increment(ref specialItems); };
         storage.CapacityExceeded += _ => Interlocked.Increment(ref resizes);
 
         _current = storage;
@@ -89,7 +82,7 @@ internal static class Program
                 {
                     try
                     {
-                        storage.Add(Random.Shared.Next(1000));
+                        storage.Add(WorkTask.CreateRandom());
                     }
                     catch (Exception ex)
                     {
@@ -102,7 +95,7 @@ internal static class Program
 
         var sw = Stopwatch.StartNew();
         foreach (var t in threads) t.Start();
-        foreach (var t in threads) t.Join();          // чекаємо завершення всіх продюсерів
+        foreach (var t in threads) t.Join();
         sw.Stop();
 
         int actual = storage.Count;
@@ -120,16 +113,14 @@ internal static class Program
             ? "РЕЗУЛЬТАТ: цілісність збережена, кількість збігається."
             : "РЕЗУЛЬТАТ: ПОРУШЕННЯ ЦІЛІСНОСТІ — стан гонки!");
 
-        Thread.Sleep(400);   // щоб монітор встиг вивести фінальний стан
+        Thread.Sleep(400);
     }
 
-    ///////////////////////// Демонстрація впливу пріоритетів ///////////////////////
     private static void RunPriorityDemo()
     {
         const int DurationMs = 3000;
 
-        // Фільтр, тільки значення >= 10
-        var storage = new DynamicArrayStorageImplementation<int>(enableLock: true, initialCapacity: 4, acceptFilter: x => x >= 10);
+        var storage = new DynamicArrayStorageImplementation<WorkTask>(enableLock: true, initialCapacity: 4, acceptFilter: x => x.Priority >= 10);
         _current = storage;
         _stop = false;
 
@@ -137,8 +128,6 @@ internal static class Program
         var generated = new long[priorities.Length];
         var threads = new Thread[priorities.Length];
 
-        // Пріоритети дають помітний ефект лише при конкуренції за ЦП,
-        // тому на час тесту прив'язуємо процес до одного ядра (де підтримується).
         IntPtr? oldAffinity = TryPinToSingleCore();
         Console.WriteLine(oldAffinity.HasValue
             ? "Процес прив'язано до одного ядра для чистоти експерименту."
@@ -152,7 +141,14 @@ internal static class Program
                 long local = 0;
                 while (!_stop)
                 {
-                    storage.Add(Random.Shared.Next(1000));
+                    double dummy = 0;
+                    for (int c = 0; c < 100_000; c++) 
+                    {
+                        dummy += Math.Sin(c) * Math.Cos(c);
+                    }
+
+                    var task = WorkTask.CreateHeavy(payloadSize: 100);
+                    storage.Add(task);
                     local++;
                 }
                 generated[idx] = local;
@@ -164,7 +160,7 @@ internal static class Program
         }
 
         foreach (var t in threads) t.Start();
-        Thread.Sleep(DurationMs);       // однаковий інтервал для всіх
+        Thread.Sleep(DurationMs);
         _stop = true;
         foreach (var t in threads) t.Join();
 
@@ -182,9 +178,8 @@ internal static class Program
             ? "РЕЗУЛЬТАТ: Count + Rejected == згенеровано — дані цілісні."
             : "РЕЗУЛЬТАТ: невідповідність!");
 
-        // Демонстрація TryRemove (LIFO) та Clear
         Console.Write("TryRemove x3: ");
-        for (int i = 0; i < 3 && storage.TryRemove(out int v); i++) Console.Write(v + " ");
+        for (int i = 0; i < 3 && storage.TryRemove(out WorkTask v); i++) Console.Write(v + " ");
         Console.WriteLine($"-> Count={storage.Count:N0}");
         storage.Clear();
         Console.WriteLine($"Після Clear(): Count={storage.Count}");
@@ -194,16 +189,64 @@ internal static class Program
     {
         try
         {
-            var p = Process.GetCurrentProcess();
-            IntPtr old = p.ProcessorAffinity;
-            p.ProcessorAffinity = (IntPtr)1;
-            return old;
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
+            {
+                var p = Process.GetCurrentProcess();
+                IntPtr old = p.ProcessorAffinity;
+                p.ProcessorAffinity = (IntPtr)1;
+                return old;
+            }
         }
-        catch { return null; }
+        catch { }
+        return null;
     }
 
     private static void RestoreAffinity(IntPtr old)
     {
-        try { Process.GetCurrentProcess().ProcessorAffinity = old; } catch { }
+        try 
+        { 
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
+            {
+                Process.GetCurrentProcess().ProcessorAffinity = old; 
+            }
+        } 
+        catch { }
     }
+}
+
+public sealed class WorkTask : IComparable<WorkTask>
+{
+    public Guid Id { get; }
+    public int Priority { get; }
+    public List<int> DataPayload { get; }
+
+    public WorkTask(int priority, List<int> payload)
+    {
+        Id = Guid.NewGuid();
+        Priority = priority;
+        DataPayload = payload;
+    }
+
+    public static WorkTask CreateRandom()
+    {
+        return new WorkTask(Random.Shared.Next(1000), new List<int> { 1, 2, 3 });
+    }
+
+    public static WorkTask CreateHeavy(int payloadSize)
+    {
+        var list = new List<int>(payloadSize);
+        for (int i = 0; i < payloadSize; i++)
+        {
+            list.Add(Random.Shared.Next(1000));
+        }
+        return new WorkTask(Random.Shared.Next(1000), list);
+    }
+
+    public int CompareTo(WorkTask? other)
+    {
+        if (other is null) return 1;
+        return Priority.CompareTo(other.Priority);
+    }
+
+    public override string ToString() => $"[Task:{Priority}]";
 }
