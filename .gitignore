@@ -484,3 +484,6 @@ $RECYCLE.BIN/
 *.swp
 
 *.vscode
+# TLC Model Checker dumps and traces
+**/states/
+*_trace_*.tlc
