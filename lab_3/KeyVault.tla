@@ -65,6 +65,16 @@ Next == \E p \in Procs :
   \/ RequestAccess(p) \/ PassTurn(p) \/ EnterVault(p)
   \/ ExecuteOp(p) \/ FinishWork(p) \/ ReleaseAccess(p)
 
+Spec ==
+  /\ Init
+  /\ [][Next]_vars
+  /\ \A p \in Procs :
+       /\ WF_vars(PassTurn(p))
+       /\ WF_vars(EnterVault(p))
+       /\ WF_vars(ExecuteOp(p))
+       /\ WF_vars(FinishWork(p))
+       /\ WF_vars(ReleaseAccess(p))
+
 MutualExclusion ==
   \A p, q \in Procs :
     p # q => ~(pc[p] \in {"cs", "closing"} /\ pc[q] \in {"cs", "closing"})
@@ -74,4 +84,12 @@ VaultConsistency ==
   /\ (\A p \in Procs : pc[p] # "cs") => vault_holder = "none"
   /\ \A p \in Procs : pc[p] # "cs" => ops_left[p] = 0
 
+Trying(p) == pc[p] \in {"set_turn", "wait"}
+
+Progress == (\E p \in Procs : Trying(p)) ~> (\E p \in Procs : pc[p] = "cs")
+
+NoStarvation ==
+  \A p \in Procs :
+    /\ (pc[p] = "set_turn") ~> (pc[p] = "cs")
+    /\ (pc[p] = "cs") ~> (pc[p] = "idle")
 ====
