@@ -65,4 +65,13 @@ Next == \E p \in Procs :
   \/ RequestAccess(p) \/ PassTurn(p) \/ EnterVault(p)
   \/ ExecuteOp(p) \/ FinishWork(p) \/ ReleaseAccess(p)
 
+MutualExclusion ==
+  \A p, q \in Procs :
+    p # q => ~(pc[p] \in {"cs", "closing"} /\ pc[q] \in {"cs", "closing"})
+
+VaultConsistency ==
+  /\ \A p \in Procs : pc[p] = "cs" => vault_holder = p
+  /\ (\A p \in Procs : pc[p] # "cs") => vault_holder = "none"
+  /\ \A p \in Procs : pc[p] # "cs" => ops_left[p] = 0
+
 ====
